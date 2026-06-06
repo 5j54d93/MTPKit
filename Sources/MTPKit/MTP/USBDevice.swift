@@ -224,7 +224,7 @@ public final class USBDevice: @unchecked Sendable {
             let buffer = makeBuffer(start, end)
             group.enter()
             do {
-                try bulkOut.enqueueIORequest(with: buffer, completionTimeout: 60) { status, _ in
+                try bulkOut.enqueueIORequest(with: buffer, completionTimeout: 30) { status, _ in
                     let done = state.record(status: status, bytes: bytes)
                     if let done { onProgress(Int64(max(0, done - header.count))) }
                     inFlight.signal()
@@ -239,9 +239,27 @@ public final class USBDevice: @unchecked Sendable {
             sent = end
         }
 
-        let result = group.wait(timeout: .now() + 600)
+        // Drain the outstanding requests, but poll rather than block once for a long time, so
+        // we stay responsive to cancellation and to an error reported by a completion, and so a
+        // wedged device can't freeze the MTP session for minutes.
+        if threwError == nil {
+            let deadline = Date().addingTimeInterval(120)
+            while group.wait(timeout: .now() + 0.1) == .timedOut {
+                if Task.isCancelled { threwError = TransportError.cancelled; break }
+                if let err = state.firstError { threwError = Self.mapIOError(err); break }
+                if Date() >= deadline { threwError = MTPError.deviceStalled; break }
+            }
+        }
+
+        // Stopping early (cancel / error / timeout) can leave USB requests in flight; abort them
+        // so they finish now — otherwise the next transaction on this endpoint would collide. A
+        // synchronous abort returns only once the aborted IO has completed.
+        if threwError != nil {
+            try? bulkOut.__abort(with: .synchronous)   // waits for aborted IO to finish
+            _ = group.wait(timeout: .now() + 5)
+        }
+
         if let threwError { throw threwError }
-        if result == .timedOut { throw MTPError.deviceStalled }
         if let err = state.firstError { throw Self.mapIOError(err) }
     }
 
