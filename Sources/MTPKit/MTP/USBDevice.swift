@@ -425,7 +425,12 @@ public final class USBDevice: @unchecked Sendable {
         while service != 0 {
             let cls = intProp(service, "bInterfaceClass")
             let proto = intProp(service, "bInterfaceProtocol")
-            if cls == 6 && proto == 1 { return service } // PTP/MTP; caller releases
+            let vendor = intProp(service, "idVendor")
+            // Class 6 (still imaging), protocol 1 = PTP/MTP. Apple devices (0x05AC) expose PTP
+            // too — an iPhone's photo interface matches — but they're not MTP responders, so
+            // they'd show up as a bogus device with no storages. Skip them; this also keeps an
+            // attached iPhone from shadowing the actual Android phone.
+            if cls == 6 && proto == 1 && vendor != 0x05AC { return service } // caller releases
             IOObjectRelease(service)
             service = IOIteratorNext(iter)
         }
